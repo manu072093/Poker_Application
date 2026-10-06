@@ -1,0 +1,24 @@
+server:
+  error:
+    include-message: always
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/poker;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+
+app:
+  jwt:
+    # MUST be overridden in production (at least 32 bytes): export JWT_SECRET=...
+    secret: ${JWT_SECRET:dev-only-secret-change-me-dev-only-secret-change-me}
+    expiration-minutes: 720
+  allowed-origin: ${ALLOWED_ORIGIN:http://localhost:5173}
+
+poker:
+  starting-chips: 10000
+  turn-seconds: 20
+  next-hand-delay-seconds: 5

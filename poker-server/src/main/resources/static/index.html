@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Poker</title>
+<script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;font:15px system-ui,sans-serif;background:#10151c;color:#e8edf2}
+button{background:#2d6cdf;color:#fff;border:0;border-radius:6px;padding:8px 14px;cursor:pointer;font-size:14px}
+button.alt{background:#3a4452}button.red{background:#c0392b}button:disabled{opacity:.5}
+input{background:#1b232d;color:#e8edf2;border:1px solid #3a4452;border-radius:6px;padding:8px}
+.wrap{max-width:980px;margin:0 auto;padding:16px}.card-box{background:#18202a;border-radius:10px;padding:16px;margin-bottom:14px}
+h2,h3{margin:0 0 10px}table{width:100%;border-collapse:collapse}td,th{padding:7px;text-align:left;border-bottom:1px solid #2a3340}
+.hide{display:none}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.sp{flex:1}.err{color:#ff7b72;min-height:20px}
+#felt{position:relative;height:470px;background:radial-gradient(#1f7a4d,#0e4a2e);border:8px solid #5a3a1c;border-radius:200px/160px;margin:10px 0}
+.seat{position:absolute;transform:translate(-50%,-50%);background:#0c1117cc;border:2px solid #3a4452;border-radius:10px;padding:6px 10px;text-align:center;min-width:110px}
+.seat.turn{border-color:#f5c542;box-shadow:0 0 12px #f5c542}.seat.out{opacity:.45}.seat.me{border-color:#4aa3ff}
+.nm{font-weight:600}.stk{color:#9ad1a5}.bet{color:#f5c542;font-size:13px;min-height:16px}.badge{background:#f5c542;color:#000;border-radius:9px;padding:0 6px;font-size:11px;margin-left:4px}
+.card{display:inline-block;background:#fff;color:#111;border-radius:5px;padding:3px 5px;margin:2px;font-weight:700;min-width:30px}.card.red{color:#d11}.card.back{background:#2d6cdf;color:#2d6cdf}
+#center{position:absolute;left:50%;top:46%;transform:translate(-50%,-50%);text-align:center}#res{color:#f5c542;min-height:20px}
+#chat{height:110px;overflow:auto;background:#0c1117;border-radius:6px;padding:6px;margin-bottom:6px;font-size:13px}
+#toast{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);background:#333;padding:10px 16px;border-radius:8px;display:none}#toast.bad{background:#c0392b}
+</style></head><body><div class="wrap">
+
+<div id="auth" class="card-box" style="max-width:360px;margin:60px auto"><h2>♠ Poker</h2>
+<div class="row"><input id="u" placeholder="username" autocomplete="username"></div><br>
+<div class="row"><input id="p" type="password" placeholder="password (8+ chars)" autocomplete="current-password"></div><br>
+<div class="row"><button onclick="auth('login')">Log in</button><button class="alt" onclick="auth('register')">Register</button></div>
+<p class="err" id="autherr"></p></div>
+
+<div id="lobby" class="hide">
+<div class="row card-box"><h2 class="sp">Lobby</h2><span id="who"></span><button class="alt" onclick="logout()">Log out</button></div>
+<div class="card-box"><h3>Tables</h3><table id="rooms"></table></div>
+<div class="card-box"><h3>🏆 Leaderboard</h3><table id="board"></table></div></div>
+
+<div id="table" class="hide">
+<div class="row"><button class="alt" onclick="leave()">← Leave table</button><h3 class="sp" id="rname"></h3><span id="mychips"></span></div>
+<div id="felt"><div id="center"><div id="board-cards"></div><div id="pot"></div><div id="res"></div></div></div>
+<div class="card-box row" id="actions"></div>
+<div class="card-box"><div id="chat"></div><div class="row"><input id="chatin" class="sp" maxlength="200" placeholder="Say something…" onkeydown="if(event.key==='Enter')chat()"><button onclick="chat()">Send</button></div></div>
+</div></div><div id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let token=sessionStorage.token, me=sessionStorage.me, client, roomId, pub, priv, subs={}, rooms=[], tick;
+
+function toast(m,bad){const t=$('#toast');t.textContent=m;t.className=bad?'bad':'';t.style.display='block';clearTimeout(t.h);t.h=setTimeout(()=>t.style.display='none',4000)}
+function show(v){['auth','lobby','table'].forEach(x=>$('#'+x).classList.toggle('hide',x!==v))}
+async function api(path,opts={}){
+  const r=await fetch(path,{...opts,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})}});
+  const t=await r.text();let d={};try{d=t?JSON.parse(t):{}}catch{}
+  if(!r.ok){if(r.status===401&&token&&!path.includes('auth')){logout();}
+    throw new Error(d.message||({401:'Invalid username or password',409:'Username already taken',400:'Username: 3-20 letters/digits/_ . Password: 8+ characters.'}[r.status])||'Error '+r.status)}
+  return d}
+
+async function auth(kind){
+  try{const d=await api('/api/auth/'+kind,{method:'POST',body:JSON.stringify({username:$('#u').value.trim(),password:$('#p').value})});
+    token=d.token;me=d.username;sessionStorage.token=token;sessionStorage.me=me;start()}
+  catch(e){$('#autherr').textContent=e.message}}
+function logout(){sessionStorage.clear();token=me=null;client&&client.deactivate();client=null;roomId=null;show('auth')}
+
+function start(){$('#autherr').textContent='';connect();loadLobby()}
+function connect(){
+  if(client)client.deactivate();
+  client=new StompJs.Client({brokerURL:(location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws',
+    connectHeaders:{Authorization:'Bearer '+token},reconnectDelay:3000,
+    onConnect:()=>{
+      client.subscribe('/user/queue/table',m=>{priv=JSON.parse(m.body);if(priv.roomId===roomId)render()});
+      client.subscribe('/user/queue/notices',m=>toast(JSON.parse(m.body).message));
+      client.subscribe('/user/queue/errors',m=>toast(JSON.parse(m.body).message,true));
+      if(roomId)subscribeRoom(roomId)},
+    onStompError:f=>toast(f.headers.message||'Connection error',true)});
+  client.activate()}
+
+async function loadLobby(){
+  show('lobby');$('#who').textContent=me;
+  try{const p=await api('/api/me');$('#who').textContent=`${p.username} · ${p.chips.toLocaleString()} chips`}catch{}
+  try{rooms=await api('/api/rooms');
+    $('#rooms').innerHTML='<tr><th>Table</th><th>Blinds</th><th>Buy-in</th><th>Seats</th><th></th></tr>'+rooms.map(r=>
+      `<tr><td>${esc(r.name)}</td><td>${r.smallBlind}/${r.bigBlind}</td><td>${r.minBuyIn}–${r.maxBuyIn}</td><td>${r.seated}/${r.maxSeats}</td>
+      <td><button onclick="join('${r.id}')">Sit</button> <button class="alt" onclick="openRoom('${r.id}')">Watch</button></td></tr>`).join('')}catch(e){toast(e.message,true)}
+  try{const b=await api('/api/leaderboard');
+    $('#board').innerHTML='<tr><th>#</th><th>Player</th><th>Winnings</th><th>Hands won</th></tr>'+(b.map(x=>
+      `<tr><td>${x.rank}</td><td>${esc(x.username)}</td><td>${x.totalWinnings}</td><td>${x.handsWon}/${x.handsPlayed}</td></tr>`).join('')||'<tr><td colspan=4>No players yet</td></tr>')}catch{}}
+
+function join(id){
+  const r=rooms.find(x=>x.id===id);const v=prompt(`Buy-in (${r.minBuyIn}–${r.maxBuyIn})`,r.minBuyIn);
+  if(v===null)return;if(!client||!client.connected)return toast('Still connecting, try again',true);
+  openRoom(id);send('join',{buyIn:parseInt(v,10)||0})}
+function openRoom(id){
+  if(!client||!client.connected)return toast('Still connecting, try again',true);
+  roomId=id;pub=priv=null;show('table');subscribeRoom(id);send('state');render()}
+function subscribeRoom(id){
+  Object.values(subs).forEach(s=>s.unsubscribe());$('#chat').innerHTML='';
+  subs.pub=client.subscribe('/topic/rooms/'+id,m=>{pub=JSON.parse(m.body);render()});
+  subs.chat=client.subscribe('/topic/rooms/'+id+'/chat',m=>{const c=JSON.parse(m.body),d=document.createElement('div');
+    d.textContent=c.from+': '+c.text;const box=$('#chat');box.appendChild(d);box.scrollTop=box.scrollHeight})}
+function send(dest,body){client.publish({destination:`/app/rooms/${roomId}/${dest}`,body:body?JSON.stringify(body):''})}
+function leave(){if(roomId)send('leave');Object.values(subs).forEach(s=>s.unsubscribe());subs={};roomId=null;clearInterval(tick);setTimeout(loadLobby,400)}
+function chat(){const i=$('#chatin');if(i.value.trim()){send('chat',{text:i.value});i.value=''}}
+function act(type,amount){send('action',{type,amount:amount||0})}
+
+const card=c=>{const r=c[0]==='T'?'10':c[0],s=c[1];return `<span class="card ${'dh'.includes(s)?'red':''}">${r}${'♣♦♥♠'['cdhs'.indexOf(s)]}</span>`};
+const nm=id=>id.replace('bot:','');
+
+function render(){
+  if(!roomId||!pub)return;
+  const seated=pub.view.seats.some(s=>s.id===me);
+  const st=seated&&priv&&priv.roomId===roomId?priv:pub, v=st.view, seats=v.seats, n=seats.length;
+  $('#rname').textContent=st.roomName;
+  const mi=Math.max(0,seats.findIndex(s=>s.id===me));
+  $('#felt').querySelectorAll('.seat').forEach(e=>e.remove());
+  seats.forEach((_,i)=>{
+    const s=seats[(mi+i)%n],a=(90+i*360/n)*Math.PI/180,x=50+40*Math.cos(a),y=50+40*Math.sin(a);
+    const cards=s.holeCards.length?s.holeCards.map(card).join(''):(s.hasCards&&!s.folded?'<span class="card back">??</span><span class="card back">??</span>':'');
+    const d=document.createElement('div');
+    d.className='seat'+(s.toAct?' turn':'')+(s.folded?' out':'')+(s.id===me?' me':'');
+    d.style.left=x+'%';d.style.top=y+'%';
+    d.innerHTML=`<div class="nm">${esc(nm(s.name))}${s.dealer?'<span class="badge">D</span>':''}${s.allIn?'<span class="badge">ALL-IN</span>':''}</div>
+      <div class="stk">${s.stack}</div><div class="bet">${s.bet?'bet '+s.bet:''}</div><div>${cards}</div>`;
+    $('#felt').appendChild(d)});
+  $('#board-cards').innerHTML=v.board.map(card).join('')||'&nbsp;';
+  $('#pot').textContent=v.phase==='WAITING'?'Waiting for players…':`Pot: ${v.pot}  ·  ${v.phase}`;
+  $('#res').textContent=v.result?v.result.awards.map(a=>`${a.winnerIds.map(nm).join(' & ')} won ${a.amount} (${a.handName.replace(/_/g,' ').toLowerCase()})`).join(' | '):'';
+  const mine=seats.find(s=>s.id===me);$('#mychips').textContent=mine?`Your stack: ${mine.stack}`:'Spectating';
+  const L=st.legal,box=$('#actions');clearInterval(tick);
+  if(L&&v.toActId===me){
+    box.innerHTML=`<b>Your turn</b> <span id="timer"></span><span class="sp"></span><button class="red" onclick="act('FOLD')">Fold</button>
+      ${L.canCheck?`<button onclick="act('CHECK')">Check</button>`:`<button onclick="act('CALL')">Call ${L.toCall}</button>`}
+      ${L.canRaise?`<input id="amt" type="number" min="${L.minRaiseTo}" max="${L.maxRaiseTo}" value="${L.minRaiseTo}" style="width:100px">
+      <button onclick="act('RAISE',+$('#amt').value)">Raise to</button><button class="alt" onclick="act('ALL_IN')">All-in ${L.maxRaiseTo}</button>`:''}`;
+    const upd=()=>{const t=$('#timer');if(t&&st.turnDeadlineMillis)t.textContent=Math.max(0,Math.ceil((st.turnDeadlineMillis-Date.now())/1000))+'s'};
+    upd();tick=setInterval(upd,250)}
+  else box.innerHTML=mine?'<span style="color:#8a97a6">Waiting for other players…</span>':'<span style="color:#8a97a6">Watching. Go back to the lobby and press Sit to join.</span>'}
+
+if(token&&me)start();else show('auth');
+</script></body></html>
