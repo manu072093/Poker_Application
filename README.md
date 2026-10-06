@@ -1,4 +1,4 @@
-# Poker_Application
+
 # ♠ Poker Application
 
 A multiplayer **Texas Hold'em** poker game that runs in the browser. The backend is Java 21 and Spring Boot, with real-time play over WebSockets.
